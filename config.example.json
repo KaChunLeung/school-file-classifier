@@ -1,8 +1,6 @@
 {
   "download_dir": "C:\\Users\\YourUser\\Downloads",
-  "destination_root": "C:\\Users\\YourUser\\Downloads\\WinterTerm",
-  "school_domain": "imperial.insendi.com",
-  "programme_id": "qSErlKBRX",
+  "destination_root": "C:\\Users\\YourUser\\Documents\\School",
   "groq_api_key": "YOUR_GROQ_API_KEY_HERE",
   "sub_folders": [
     "Lectures",
@@ -10,5 +8,6 @@
     "Assignments",
     "Other"
   ],
+  "platforms": [],
   "courses": {}
 }

@@ -1,11 +1,17 @@
-"""Scan Chrome download history and classify files by Insendi course."""
+"""Scan Chrome download history and classify files by course using platform adapters."""
 
-import re
+from __future__ import annotations
+
 import shutil
 import sqlite3
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
+
+from platforms import ALL_ADAPTERS, get_adapter
+from platforms.base import PlatformAdapter
+from platforms.generic import GenericAdapter
 
 
 @dataclass
@@ -14,7 +20,15 @@ class ClassifiedFile:
     course_id: str
     course_name: str
     download_url: str
+    platform: str = ""       # adapter name, e.g. "Canvas"
     sub_type: str = "Other"  # Lectures, Tutorials, Assignments, Other
+
+
+@dataclass
+class NewCourse:
+    """A newly discovered course not yet in config."""
+    course_id: str
+    suggested_name: str
 
 
 def _get_chrome_history_db() -> Path:
@@ -31,76 +45,43 @@ def _get_chrome_history_db() -> Path:
     )
 
 
-def _extract_course_id(url: str) -> str | None:
-    """Extract the course ID from an Insendi URL.
+def _resolve_adapter(
+    url: str, platform_configs: list[dict]
+) -> tuple[PlatformAdapter, str] | None:
+    """Find the adapter + domain that matches a URL.
 
-    Handles the pattern: /programmes/{pid}/courses/{courseId}/...
-    Returns None for API-style URLs (/api/v1/imp/files/...).
+    Checks configured platforms first, then falls back to the generic adapter.
     """
-    match = re.search(r"/courses/([A-Za-z0-9_-]+)", url)
-    return match.group(1) if match else None
+    for pcfg in platform_configs:
+        domain = pcfg["domain"]
+        if domain not in url:
+            continue
+        adapter = get_adapter(pcfg["type"])
+        if adapter and adapter.matches_url(url, domain):
+            return adapter, domain
 
+    # Fallback: try to extract domain from URL and use generic adapter
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc
+    except Exception:
+        return None
 
-def _infer_course_from_visits(
-    cursor: sqlite3.Cursor, download_time: int, domain: str
-) -> str | None:
-    """For API-style downloads with no course ID in the URL, find the most
-    recently visited course page before the download happened."""
-    cursor.execute(
-        """
-        SELECT u.url
-        FROM visits v
-        JOIN urls u ON v.url = u.id
-        WHERE u.url LIKE ?
-          AND v.visit_time <= ?
-        ORDER BY v.visit_time DESC
-        LIMIT 1
-        """,
-        (f"%{domain}%/courses/%", download_time),
-    )
-    row = cursor.fetchone()
-    if row:
-        return _extract_course_id(row[0])
+    if not domain:
+        return None
+
+    # Check if any configured platform domain is in this URL's domain
+    for pcfg in platform_configs:
+        if pcfg["domain"] in domain or domain in pcfg["domain"]:
+            adapter = get_adapter(pcfg["type"])
+            if adapter:
+                return adapter, pcfg["domain"]
+
     return None
 
 
-def _discover_course_name(
-    cursor: sqlite3.Cursor, course_id: str, domain: str
-) -> str:
-    """Try to discover a course name from Chrome's page titles.
-
-    Insendi page titles follow patterns like:
-      "Course Name - Files", "Course Name - Newsfeed", etc.
-    """
-    cursor.execute(
-        """
-        SELECT title
-        FROM urls
-        WHERE url LIKE ?
-          AND title != ''
-        ORDER BY last_visit_time DESC
-        LIMIT 5
-        """,
-        (f"%{domain}%/courses/{course_id}%",),
-    )
-    rows = cursor.fetchall()
-    for (title,) in rows:
-        # Strip common Insendi suffixes: " - Files", " - Newsfeed", etc.
-        cleaned = re.sub(r"\s*[-–—]\s*(Files|Newsfeed|Weeks|Grades|People|Settings)\s*$", "", title).strip()
-        if cleaned and cleaned.lower() not in ("", "insendi", "loading"):
-            return cleaned
-    return ""
-
-
-@dataclass
-class NewCourse:
-    """A newly discovered course not yet in config."""
-    course_id: str
-    suggested_name: str
-
-
 def scan_downloads(config: dict) -> tuple[list[ClassifiedFile], list[NewCourse]]:
-    """Scan Chrome history for Insendi downloads still in the Downloads folder.
+    """Scan Chrome history for LMS downloads still in the Downloads folder.
 
     Returns (classified_files, new_courses) where new_courses contains
     any course IDs found in downloads that aren't in the config yet.
@@ -110,7 +91,10 @@ def scan_downloads(config: dict) -> tuple[list[ClassifiedFile], list[NewCourse]]
         return [], []
 
     download_dir = Path(config["download_dir"])
-    domain = config["school_domain"]
+    platform_configs = config.get("platforms", [])
+
+    if not platform_configs:
+        return [], []
 
     # Copy DB to temp file to avoid Chrome's lock
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
@@ -118,7 +102,9 @@ def scan_downloads(config: dict) -> tuple[list[ClassifiedFile], list[NewCourse]]
     tmp_path = Path(tmp.name)
     try:
         shutil.copy2(chrome_db, tmp_path)
-        results, new_courses = _query_downloads(tmp_path, download_dir, domain, config)
+        results, new_courses = _query_downloads(
+            tmp_path, download_dir, platform_configs, config
+        )
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -136,20 +122,33 @@ def scan_downloads(config: dict) -> tuple[list[ClassifiedFile], list[NewCourse]]
 
 
 def _query_downloads(
-    db_path: Path, download_dir: Path, domain: str, config: dict
+    db_path: Path,
+    download_dir: Path,
+    platform_configs: list[dict],
+    config: dict,
 ) -> tuple[list[ClassifiedFile], list[NewCourse]]:
     """Query the copied Chrome history DB for matching downloads."""
     conn = sqlite3.connect(str(db_path))
     try:
         cursor = conn.cursor()
+
+        # Build a SQL filter for all configured platform domains
+        domain_filters = []
+        params: list[str] = []
+        for pcfg in platform_configs:
+            domain_filters.append("tab_url LIKE ? OR referrer LIKE ?")
+            like = f"%{pcfg['domain']}%"
+            params.extend([like, like])
+
+        where_clause = " OR ".join(f"({f})" for f in domain_filters)
         cursor.execute(
-            """
+            f"""
             SELECT tab_url, target_path, referrer, start_time
             FROM downloads
-            WHERE (tab_url LIKE ? OR referrer LIKE ?)
+            WHERE {where_clause}
             ORDER BY start_time DESC
             """,
-            (f"%{domain}%", f"%{domain}%"),
+            params,
         )
 
         seen_paths: set[str] = set()
@@ -168,21 +167,29 @@ def _query_downloads(
             except (OSError, ValueError):
                 continue
 
-            # Deduplicate (Chrome can log the same file multiple times)
+            # Deduplicate
             path_key = str(file_path).lower()
             if path_key in seen_paths:
                 continue
             seen_paths.add(path_key)
 
+            # Find matching adapter
+            resolved = _resolve_adapter(tab_url, platform_configs)
+            if not resolved:
+                resolved = _resolve_adapter(referrer or "", platform_configs)
+            if not resolved:
+                continue
+
+            adapter, domain = resolved
+
             # Extract course ID — try tab_url first, then referrer
-            course_id = _extract_course_id(tab_url) or _extract_course_id(
+            course_id = adapter.extract_course_id(tab_url) or adapter.extract_course_id(
                 referrer or ""
             )
 
-            # Fallback: for API-style downloads, correlate with the most
-            # recently visited course page before the download time
+            # Fallback: correlate with recently visited course pages
             if not course_id:
-                course_id = _infer_course_from_visits(
+                course_id = adapter.infer_course_from_visits(
                     cursor, start_time, domain
                 )
 
@@ -191,7 +198,7 @@ def _query_downloads(
             elif course_id:
                 # Unknown course — try to discover its name
                 if course_id not in discovered:
-                    name = _discover_course_name(cursor, course_id, domain)
+                    name = adapter.discover_course_name(cursor, course_id, domain)
                     discovered[course_id] = name if name else f"New Course ({course_id[:8]})"
                 course_name = discovered[course_id]
             else:
@@ -203,6 +210,7 @@ def _query_downloads(
                     course_id=course_id or "unknown",
                     course_name=course_name,
                     download_url=tab_url,
+                    platform=adapter.name,
                 )
             )
 

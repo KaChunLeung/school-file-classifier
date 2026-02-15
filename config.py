@@ -1,31 +1,50 @@
-"""Configuration management for Imperial File Classifier."""
+"""Configuration management for School File Classifier."""
 
 import json
+import sys
 from pathlib import Path
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+# When running as a PyInstaller exe, __file__ points to a temp extraction dir.
+# Use the exe's directory instead so config.json lives next to the exe.
+if getattr(sys, "frozen", False):
+    _BASE_DIR = Path(sys.executable).parent
+else:
+    _BASE_DIR = Path(__file__).parent
+
+CONFIG_PATH = _BASE_DIR / "config.json"
 
 DEFAULTS = {
     "download_dir": str(Path.home() / "Downloads"),
-    "destination_root": str(Path.home() / "Documents" / "Imperial"),
-    "school_domain": "imperial.insendi.com",
-    "programme_id": "qSErlKBRX",
+    "destination_root": str(Path.home() / "Documents" / "School"),
     "groq_api_key": "",
     "sub_folders": ["Lectures", "Tutorials", "Assignments", "Other"],
-    "courses": {
-        "ZNgm66ic_z": "Big Data in Finance",
-        "eQzfK6_unk": "Derivatives",
-        "gHijJWnoEw": "Accounting & Corporate Finance",
-        "pcp5uqKK73": "Blockchain and Applications",
-        "GUUrYtOA2e": "C++ for Finance",
-        "FD9R_qtRds": "Introduction to Maths",
-        "uEgGTaPYYx": "International Finance",
-        "br3yeiapUK": "Financial Econometrics",
-        "3G5A73tb39": "Application of R for Finance",
-        "PsG5VmwXkz": "Mathematics for Finance",
-        "xzaXFRvZo5": "Markets and Securities",
-    },
+    "platforms": [],   # Auto-detected: [{"domain": "...", "type": "canvas"}, ...]
+    "courses": {},     # Populated via auto-discovery
 }
+
+
+def _migrate_v1_config(config: dict) -> dict:
+    """Migrate from v1 config format (single school_domain) to v2 (platforms list).
+
+    Preserves existing course mappings and settings.
+    """
+    if "school_domain" not in config:
+        return config
+
+    domain = config.pop("school_domain", "")
+    config.pop("programme_id", None)
+
+    if domain and "platforms" not in config:
+        # Guess platform type from domain
+        if "insendi" in domain:
+            ptype = "insendi"
+        elif "instructure" in domain:
+            ptype = "canvas"
+        else:
+            ptype = "generic"
+        config["platforms"] = [{"domain": domain, "type": ptype}]
+
+    return config
 
 
 def load_config() -> dict:
@@ -33,6 +52,8 @@ def load_config() -> dict:
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             config = json.load(f)
+        # Migrate old format if needed
+        config = _migrate_v1_config(config)
         # Merge any new default keys the user doesn't have yet
         for key, value in DEFAULTS.items():
             if key not in config:
