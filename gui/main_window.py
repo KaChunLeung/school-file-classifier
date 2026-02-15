@@ -17,7 +17,15 @@ from PySide6.QtWidgets import (
     QToolBar,
 )
 
-from classifier import ClassifiedFile, NewCourse, scan_downloads
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
+)
+
+from classifier import ClassifiedFile, NewCourse, scan_downloads, _get_chrome_history_db
 from config import load_config, save_config
 from file_ops import FileOps
 from gui.dialogs import (
@@ -184,11 +192,7 @@ class MainWindow(QMainWindow):
         """Auto-detect platforms from Chrome history on first run."""
         self._set_status("Detecting school platforms from Chrome history...")
 
-        chrome_db = (
-            Path.home()
-            / "AppData" / "Local" / "Google" / "Chrome"
-            / "User Data" / "Default" / "History"
-        )
+        chrome_db = _get_chrome_history_db()
         if not chrome_db.exists():
             self._set_status("Chrome history not found. Configure platforms in Settings.")
             return
@@ -228,11 +232,56 @@ class MainWindow(QMainWindow):
         else:
             self._set_status("No platforms configured. Use Settings to add one.")
 
+    # ── API key prompt ────────────────────────────────────────────────────
+
+    def _ensure_api_key(self) -> bool:
+        """Prompt for Groq API key if not configured. Returns True if key is available."""
+        if self.config.get("groq_api_key"):
+            return True
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Groq API Key Required")
+        dialog.setMinimumWidth(450)
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel(
+            "<b>Groq API key needed for file sub-classification</b><br><br>"
+            "This key lets the app automatically sort files into "
+            "Lectures, Tutorials, Assignments, etc.<br><br>"
+            "Get a free key at <a href='https://console.groq.com/keys'>console.groq.com/keys</a><br><br>"
+            "You only need to enter this once."
+        ))
+
+        key_input = QLineEdit()
+        key_input.setPlaceholderText("gsk_...")
+        key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(key_input)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        skip_label = QLabel("<i>Skip to classify all files as 'Other'</i>")
+        layout.addWidget(skip_label)
+
+        if dialog.exec() and key_input.text().strip():
+            self.config["groq_api_key"] = key_input.text().strip()
+            save_config(self.config)
+            return True
+
+        return False
+
     # ── Scan ──────────────────────────────────────────────────────────────
 
     def _run_scan(self) -> None:
         if self._scan_worker and self._scan_worker.isRunning():
             return
+
+        # Prompt for API key on first scan if missing
+        self._ensure_api_key()
 
         self._set_status("Scanning Chrome history & classifying files...")
         self.btn_scan.setEnabled(False)

@@ -32,17 +32,17 @@ class NewCourse:
 
 
 def _get_chrome_history_db() -> Path:
-    """Return the path to Chrome's History SQLite database."""
-    return (
-        Path.home()
-        / "AppData"
-        / "Local"
-        / "Google"
-        / "Chrome"
-        / "User Data"
-        / "Default"
-        / "History"
-    )
+    """Return the path to Chrome's History SQLite database (auto-detects OS)."""
+    import sys
+
+    home = Path.home()
+    if sys.platform == "win32":
+        return home / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default" / "History"
+    elif sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Google" / "Chrome" / "Default" / "History"
+    else:
+        # Linux and other Unix-like
+        return home / ".config" / "google-chrome" / "Default" / "History"
 
 
 def _resolve_adapter(
