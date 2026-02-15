@@ -3,3 +3,4 @@ __pycache__/
 config.json
 *.pdf
 .claude/
+CLAUDE.md
